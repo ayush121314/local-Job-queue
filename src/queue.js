@@ -80,8 +80,13 @@ class Queue {
     return this.db.prepare('SELECT * FROM ready ORDER BY id').all()
   }
 
+  // Called by the job's own command (q ack) while it runs.
   ack(id) {
-    this.db.prepare('DELETE FROM ready WHERE id = ?').run(id)
+    return this.db.prepare('DELETE FROM ready WHERE id = ?').run(id).changes > 0
+  }
+
+  isReady(id) {
+    return Boolean(this.db.prepare('SELECT 1 FROM ready WHERE id = ?').get(id))
   }
 
   retryLater(job, runAt) {

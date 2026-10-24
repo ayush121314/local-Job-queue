@@ -10,6 +10,7 @@ function seconds(name, fallback) {
 }
 
 const config = {
+  binDir: join(root, 'bin'),
   dbPath: process.env.JOBQ_DB || join(root, 'data', 'queue.db'),
   logDir: process.env.JOBQ_LOGS || join(root, 'logs'),
   lockPath: process.env.JOBQ_LOCK || join(root, 'data', 'runner.lock'),

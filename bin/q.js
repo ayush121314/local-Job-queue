@@ -15,6 +15,8 @@ const USAGE = `q — local job queue
       --catchup once|all         laptop was off: push once (default), or once per missed slot
       --cwd <dir>                folder to run in (default: current folder)
 
+  q ack                          inside a job's command: mark it done (uses $JOBQ_JOB_ID).
+                                 A job whose command never runs q ack is retried in 5 min.
   q list                         schedules and both queues
   q remove <id>                  delete a job
   q stop <schedule id>           delete a schedule
@@ -98,6 +100,14 @@ function main() {
     if (action === 'add') return add(args, queue)
     if (action === 'every') return every(args, queue)
     if (action === 'list') return list(queue)
+    if (action === 'ack') {
+      const id = Number(args[0] || process.env.JOBQ_JOB_ID)
+      if (!id) throw new WhenError('q ack needs a job id, or run it inside a queued command ($JOBQ_JOB_ID)')
+      if (queue.ack(id)) return console.log(`#${id} acked`)
+      console.error(`#${id} is not running (already acked, removed or purged)`)
+      process.exitCode = 1
+      return
+    }
     if (action === 'remove') return console.log(queue.remove(Number(args[0])) ? `#${args[0]} removed` : `#${args[0]} not found`)
     if (action === 'stop') {
       const id = Number(String(args[0] || '').replace(/^s/i, ''))
