@@ -16,6 +16,7 @@ const config = {
   retentionSeconds: seconds('JOBQ_RETENTION_SECONDS', 3 * 24 * 3600),
   retryDelaySeconds: seconds('JOBQ_RETRY_DELAY_SECONDS', 5 * 60),
   commandTimeoutSeconds: seconds('JOBQ_COMMAND_TIMEOUT_SECONDS', 30 * 60),
+  tickSeconds: 300,
   shell: process.env.JOBQ_SHELL || '/bin/zsh',
 }
 

@@ -40,6 +40,7 @@ function tick(queue) {
   const cutoff = nowSeconds() - config.retentionSeconds
   const purged = queue.purgeOlderThan(cutoff)
   purgeLogs(cutoff)
+  const scheduled = queue.fireDueSchedules(nowSeconds())
   const moved = queue.moveDue(nowSeconds())
   let done = 0
   let failed = 0
@@ -54,10 +55,10 @@ function tick(queue) {
       runnerLog(`job ${job.id} failed (${reason}), retry in ${config.retryDelaySeconds}s`)
     }
   }
-  if (purged.length || moved || done || failed) {
-    runnerLog(`tick: purged ${purged.length}, moved ${moved}, done ${done}, failed ${failed}`)
+  if (purged.length || scheduled || moved || done || failed) {
+    runnerLog(`tick: purged ${purged.length}, scheduled ${scheduled}, moved ${moved}, done ${done}, failed ${failed}`)
   }
-  return { purged: purged.length, moved, done, failed }
+  return { purged: purged.length, scheduled, moved, done, failed }
 }
 
 function runTick() {

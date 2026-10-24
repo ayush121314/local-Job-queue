@@ -53,3 +53,8 @@ Tick 5 min (launchd), retention 3 days, retry delay 5 min, command timeout 30 mi
 
 ## Tests
 `node --test`: time parsing (every form, past refused, today-vs-tomorrow), push/move/pop/ack, failure → retry, purge after 3 days, crash leaves job in READY. Then a real run under launchd.
+
+## Schedules (added 25 Oct 2026)
+`schedules(id, command, cwd, every_seconds, next_at, catch_up once|all, created_at)`, `INDEX(next_at)`.
+Each tick, before the move: `SELECT … WHERE next_at <= now` (only due schedules). Slots due = `floor((now − next_at) / every) + 1`.
+`catch_up = once` pushes 1 job, `all` pushes one per slot; `next_at += slots × every` (stays on its slot). Schedules are never purged; `q stop`.

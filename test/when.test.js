@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseWhen, WhenError } from '../src/when.js'
+import { parseEvery, parseWhen, WhenError } from '../src/when.js'
 
 const now = new Date(2026, 9, 25, 14, 0, 0) // Sun 25 Oct 2026, 14:00 local
 const local = (...parts) => Math.floor(new Date(...parts).getTime() / 1000)
@@ -43,4 +43,12 @@ test('bad input is refused', () => {
   assert.throws(() => parseWhen('13pm', now), WhenError)
   assert.throws(() => parseWhen('18', now), WhenError)
   assert.throws(() => parseWhen('tomorrow', now), /add a time/)
+})
+
+test('intervals', () => {
+  assert.equal(parseEvery('30m', 300), 1800)
+  assert.equal(parseEvery('2h', 300), 7200)
+  assert.equal(parseEvery('1d', 300), 86400)
+  assert.throws(() => parseEvery('1m', 300), /5m or more/)
+  assert.throws(() => parseEvery('often', 300), WhenError)
 })

@@ -3,7 +3,8 @@
 A local queue of shell commands for macOS. Push a command to run now or at a time; a runner pops and runs it, SQS-style: a command is deleted only after it succeeds.
 
 ```
-q add "cmd"          ──push──▶  READY   ──pop──▶  runner runs it  (success → deleted)
+q every 10m "cmd" ── each due slot pushes ──┐
+q add "cmd"          ──push──▶  READY   ◀──┘  ──pop──▶  runner runs it  (success → deleted)
 q add 18:00 "cmd"    ──push──▶  WAITING (sorted by time)
                                    └── every 5 min: due jobs move ──▶ READY
 ```
@@ -11,6 +12,7 @@ q add 18:00 "cmd"    ──push──▶  WAITING (sorted by time)
 - **Runner:** a launchd agent. It runs at login/boot and every 5 minutes, so jobs missed while the laptop was off run as soon as it is on.
 - **Only due work is read:** WAITING is indexed on `run_at`; each tick reads `run_at <= now` and stops at the first future job.
 - **Failure:** non-zero exit or timeout → back to WAITING for 5 minutes later (`attempts + 1`).
+- **Schedules:** `q every` pushes its command into READY every interval. Slots missed while the laptop was off: `--catchup once` (default) pushes once, `--catchup all` pushes once per missed slot; the next push stays on its slot.
 - **Purge:** anything older than 3 days is deleted from both queues, with its log.
 - **Storage:** one SQLite file, `data/queue.db`.
 
@@ -28,6 +30,10 @@ q add "npm run sync" --cwd ~/code/app     # next tick (within 5 min)
 q add +30m "./report.sh"                  # +30m  +2h  +1d
 q add 18:00 "node send.js"                # today, or tomorrow if 18:00 has passed
 q add "tomorrow 9am" "..."                # also: "mon 10:00", "28 oct 18:00"
+q every 30m "./scan.sh"                   # push into the queue every 30m / 2h / 1d
+q every 1d "./daily.sh" --at 9am          # first push at 9am, then daily
+q every 1h "./sync.sh" --catchup all      # laptop off 6h → 6 pushes (default once → 1)
+q stop S<id>                              # stop a schedule
 q list
 q logs <id>
 q remove <id>

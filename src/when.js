@@ -83,6 +83,15 @@ function parseWhen(input, now = new Date()) {
   throw new WhenError(`could not read "${input}". Try +30m, +2h, 18:00, 9am, "tomorrow 9am", "mon 10:00", "28 oct 18:00"`)
 }
 
+// "30m", "2h", "1d" → seconds. Shorter than one runner tick is refused: it could never run that often.
+function parseEvery(input, minimumSeconds) {
+  const match = /^(\d+)\s*([mhd])$/.exec(String(input).trim().toLowerCase())
+  if (!match) throw new WhenError(`could not read "${input}" as an interval. Try 30m, 2h, 1d`)
+  const value = Number(match[1]) * UNIT_SECONDS[match[2]]
+  if (value < minimumSeconds) throw new WhenError(`the runner ticks every ${minimumSeconds / 60} minutes, so use ${minimumSeconds / 60}m or more`)
+  return value
+}
+
 function checkFuture(date, now, input) {
   if (date <= now) throw new WhenError(`"${input}" has already passed`)
   return Math.floor(date.getTime() / 1000)
@@ -105,4 +114,4 @@ function span(totalSeconds) {
   return `${Math.floor(hours / 24)}d ${hours % 24}h`
 }
 
-export { parseWhen, describe, WhenError }
+export { parseWhen, parseEvery, describe, span, WhenError }

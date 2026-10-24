@@ -22,6 +22,16 @@ CREATE TABLE IF NOT EXISTS ready (
 );
 CREATE INDEX IF NOT EXISTS idx_ready_created_at ON ready (created_at);
 CREATE TABLE IF NOT EXISTS ids (id INTEGER PRIMARY KEY AUTOINCREMENT);
+CREATE TABLE IF NOT EXISTS schedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  command TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  every_seconds INTEGER NOT NULL,
+  next_at INTEGER NOT NULL,
+  catch_up TEXT NOT NULL CHECK (catch_up IN ('once', 'all')),
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_next_at ON schedules (next_at);
 `
 
 class Queue {
@@ -35,20 +45,20 @@ class Queue {
 
   // One id sequence across both queues, so a job keeps its id when it moves.
   nextId() {
-    return this.db.prepare('INSERT INTO ids DEFAULT VALUES').run().lastInsertRowid
+    return Number(this.db.prepare('INSERT INTO ids DEFAULT VALUES').run().lastInsertRowid)
   }
 
   pushReady({ command, cwd, now }) {
     const id = this.nextId()
     this.db.prepare('INSERT INTO ready (id, command, cwd, attempts, created_at) VALUES (?, ?, ?, 0, ?)').run(id, command, cwd, now)
-    return Number(id)
+    return id
   }
 
   pushWaiting({ command, cwd, runAt, now }) {
     const id = this.nextId()
     this.db.prepare('INSERT INTO waiting (id, command, cwd, run_at, attempts, created_at) VALUES (?, ?, ?, ?, 0, ?)')
       .run(id, command, cwd, runAt, now)
-    return Number(id)
+    return id
   }
 
   // Reads only rows that are due: the run_at index stops the scan at the first future row.
@@ -83,6 +93,39 @@ class Queue {
     retry()
   }
 
+  addSchedule({ command, cwd, everySeconds, firstAt, catchUp, now }) {
+    return Number(this.db.prepare(
+      'INSERT INTO schedules (command, cwd, every_seconds, next_at, catch_up, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(command, cwd, everySeconds, firstAt, catchUp, now).lastInsertRowid)
+  }
+
+  // Due schedules push their command into READY. Slots missed while the laptop was off push once
+  // (catch_up 'once') or once per missed slot ('all'); next_at then moves to the next future slot.
+  fireDueSchedules(now) {
+    const fire = this.db.transaction(() => {
+      const due = this.db.prepare('SELECT * FROM schedules WHERE next_at <= ? ORDER BY next_at, id').all(now)
+      let pushed = 0
+      for (const schedule of due) {
+        const slots = Math.floor((now - schedule.next_at) / schedule.every_seconds) + 1
+        const times = schedule.catch_up === 'all' ? slots : 1
+        for (let i = 0; i < times; i += 1) this.pushReady({ command: schedule.command, cwd: schedule.cwd, now })
+        pushed += times
+        this.db.prepare('UPDATE schedules SET next_at = ? WHERE id = ?')
+          .run(schedule.next_at + slots * schedule.every_seconds, schedule.id)
+      }
+      return pushed
+    })
+    return fire()
+  }
+
+  schedules() {
+    return this.db.prepare('SELECT * FROM schedules ORDER BY next_at, id').all()
+  }
+
+  stopSchedule(id) {
+    return this.db.prepare('DELETE FROM schedules WHERE id = ?').run(id).changes > 0
+  }
+
   purgeOlderThan(cutoff) {
     const purge = this.db.transaction(() => {
       const old = [
@@ -106,6 +149,7 @@ class Queue {
     return {
       ready: this.readyJobs(),
       waiting: this.db.prepare('SELECT * FROM waiting ORDER BY run_at, id').all(),
+      schedules: this.schedules(),
     }
   }
 
