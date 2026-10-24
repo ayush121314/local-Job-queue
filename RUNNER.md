@@ -43,7 +43,7 @@ npm install && ./scripts/install.sh
 | **No time limit** | A job may run for an hour or a day. As long as its process is alive, the queue leaves it alone. |
 | **Parallel** | Every ready job is started at once, in the background. Ten due jobs = ten processes at the same time; if your jobs must not overlap, make the command itself wait (e.g. a lock file). |
 | **Failure = ended without ack** | Your command runs inside a wrapper that calls `q finished` when it ends. Ended (any exit code, even a crash) without `q ack` → retried 5 minutes later. Laptop restarted mid-job → retried on the first tick after boot. |
-| **Don't kill the wrapper** | `kill -9` on the wrapper itself (not your command) leaves the job RUNNING until the 3-day purge; clear it with `q remove <id>`. |
+| **Crash or force-kill** | Even if the wrapper itself is killed, its heartbeat (every 3 min) stops; after 10 minutes awake without one, the job is retried. Lid-closed time never counts. |
 | **At least once** | If the laptop dies after your work but before `q ack`, the job runs again. Make commands safe to repeat: check "already done?" first. |
 | **3-day purge** | A job that never acks is retried every 5 minutes until it is 3 days old, then deleted. |
 

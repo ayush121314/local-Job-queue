@@ -70,3 +70,8 @@ No pids. READY keeps only `started_at`. The wrapper is `zsh -lc "<cmd>"; echo "-
 `q finished <id>` retries the job at once if it is still in READY (not acked). A restart kills jobs before they report,
 so each tick retries READY jobs with `started_at` < boot time (`sysctl -n kern.boottime`). Gap: `kill -9` of the wrapper
 alone leaves the job RUNNING until the 3-day purge (`q remove`).
+
+## Heartbeat (added 25 Oct 2026, owner: crash/kill-all must also be retried; beat every 3 min)
+READY gains `heartbeat_at`. The wrapper runs a loop `while sleep 180; kill -0 $wrapper; do q beat $id || break; done`,
+killed when the command ends, and dying within one beat if the wrapper is gone. Dead = started_at < boot, or
+now − max(heartbeat_at, kern.waketime) > 10 min. One UPDATE per beat on the same row: no disk growth.

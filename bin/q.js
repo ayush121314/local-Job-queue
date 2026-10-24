@@ -103,6 +103,11 @@ function main() {
     if (action === 'add') return add(args, queue)
     if (action === 'every') return every(args, queue)
     if (action === 'list') return list(queue)
+    if (action === 'beat') {
+      const id = Number(args[0] || process.env.JOBQ_JOB_ID)
+      if (!id || !queue.beat(id, Math.floor(Date.now() / 1000))) process.exitCode = 1
+      return
+    }
     if (action === 'finished') {
       const id = Number(args[0] || process.env.JOBQ_JOB_ID)
       if (!id) throw new WhenError('q finished needs a job id')

@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS ready (
   cwd TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
-  started_at INTEGER
+  started_at INTEGER,
+  heartbeat_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_ready_created_at ON ready (created_at);
 CREATE TABLE IF NOT EXISTS ids (id INTEGER PRIMARY KEY AUTOINCREMENT);
@@ -45,10 +46,11 @@ class Queue {
     this.addStartColumns()
   }
 
-  // A queue.db made before fire-and-forget has no started_at on READY.
+  // A queue.db made before fire-and-forget has no started_at / heartbeat_at on READY.
   addStartColumns() {
     const columns = new Set(this.db.prepare('PRAGMA table_info(ready)').all().map((column) => column.name))
     if (!columns.has('started_at')) this.db.exec('ALTER TABLE ready ADD COLUMN started_at INTEGER')
+    if (!columns.has('heartbeat_at')) this.db.exec('ALTER TABLE ready ADD COLUMN heartbeat_at INTEGER')
   }
 
   // One id sequence across both queues, so a job keeps its id when it moves.
@@ -97,7 +99,12 @@ class Queue {
   }
 
   markStarted(id, startedAt) {
-    this.db.prepare('UPDATE ready SET started_at = ? WHERE id = ?').run(startedAt, id)
+    this.db.prepare('UPDATE ready SET started_at = ?, heartbeat_at = ? WHERE id = ?').run(startedAt, startedAt, id)
+  }
+
+  // Overwrites one number in the job's row: no growth however long the job runs.
+  beat(id, now) {
+    return this.db.prepare('UPDATE ready SET heartbeat_at = ? WHERE id = ? AND started_at IS NOT NULL').run(now, id).changes > 0
   }
 
   // Called by the job's wrapper when its command has ended. Not acked = retry; acked = already gone.

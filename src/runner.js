@@ -12,11 +12,18 @@ function runnerLog(line) {
   appendFileSync(join(config.logDir, 'runner.log'), `${stamp()} ${line}\n`)
 }
 
-// Unix seconds of the last boot. Every job started before it died with the restart.
-function bootTime() {
-  const out = execFileSync('sysctl', ['-n', 'kern.boottime'], { encoding: 'utf8' })
-  return Number(/sec = (\d+)/.exec(out)[1])
+function sysctlSeconds(name) {
+  const out = execFileSync('sysctl', ['-n', name], { encoding: 'utf8' })
+  const match = /sec = (\d+)/.exec(out)
+  return match ? Number(match[1]) : 0
 }
+
+// Unix seconds of the last boot. Every job started before it died with the restart.
+const bootTime = () => sysctlSeconds('kern.boottime')
+
+// Unix seconds of the last wake from sleep. Heartbeats stop while the lid is closed, so a job
+// is judged only on time awake since then.
+const wakeTime = () => sysctlSeconds('kern.waketime')
 
 // Fire and forget: the command runs on its own, with no time limit, and is deleted when it runs
 // `q ack` (as SQS DeleteMessage). When it ends, however it ends, the wrapper's last line reports
@@ -25,7 +32,17 @@ function startJob(queue, job) {
   const logPath = join(config.logDir, `${job.id}.log`)
   appendFileSync(logPath, `--- ${stamp()} attempt ${job.attempts + 1} started\n$ ${job.command}\n`)
   const log = openSync(logPath, 'a')
-  const wrapper = `${config.shell} -lc "$1"; echo "--- exit $?"; q finished "$JOBQ_JOB_ID"`
+  // Heartbeat: a loop beats every few minutes while the wrapper ($$) is alive, and stops when the job
+  // is acked or the wrapper is gone, so it never outlives its job.
+  const wrapper = [
+    'wrapper=$$',
+    `( while sleep ${config.heartbeatSeconds}; kill -0 $wrapper 2>/dev/null; do q beat "$JOBQ_JOB_ID" >/dev/null 2>&1 || break; done ) &`,
+    'beater=$!',
+    `${config.shell} -lc "$1"; code=$?`,
+    'kill $beater 2>/dev/null',
+    'echo "--- exit $code"',
+    'q finished "$JOBQ_JOB_ID"',
+  ].join('\n')
   const child = spawn(config.shell, ['-c', wrapper, 'jobq', job.command], {
     cwd: job.cwd,
     detached: true,
@@ -43,6 +60,14 @@ function startJob(queue, job) {
   queue.markStarted(job.id, nowSeconds())
 }
 
+// Why a started, not-acked job is no longer running, or null when it is alive.
+function deadReason(job, { now, bootedAt, wokeAt }) {
+  if (job.started_at < bootedAt) return 'the laptop restarted'
+  const lastSign = Math.max(job.heartbeat_at ?? job.started_at, wokeAt)
+  if (now - lastSign > config.heartbeatStaleSeconds) return 'no heartbeat'
+  return null
+}
+
 function purgeLogs(cutoff) {
   for (const name of readdirSync(config.logDir)) {
     if (name === 'runner.log') continue
@@ -58,18 +83,20 @@ function tick(queue) {
   const scheduled = queue.fireDueSchedules(nowSeconds())
   const moved = queue.moveDue(nowSeconds())
 
-  // A restart kills every job without its wrapper reporting, so anything started before the boot is retried.
-  const bootedAt = bootTime()
+  // Started, not acked, and not alive any more: died with a restart (started before the boot), or
+  // crashed / was killed without reporting (no heartbeat for heartbeatStaleSeconds of awake time).
+  const clock = { now: nowSeconds(), bootedAt: bootTime(), wokeAt: wakeTime() }
   let retried = 0
   let running = 0
   for (const job of queue.startedJobs()) {
-    if (job.started_at >= bootedAt) {
+    const why = deadReason(job, clock)
+    if (!why) {
       running += 1
       continue
     }
     queue.retryLater(job, nowSeconds() + config.retryDelaySeconds)
     retried += 1
-    runnerLog(`job ${job.id} was running when the laptop restarted, retry in ${config.retryDelaySeconds}s`)
+    runnerLog(`job ${job.id} not running any more (${why}), retry in ${config.retryDelaySeconds}s`)
   }
 
   const toStart = queue.notStartedJobs()
@@ -94,7 +121,7 @@ function runTick() {
   })
 }
 
-export { tick, runTick, bootTime }
+export { tick, runTick, deadReason, bootTime, wakeTime }
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   try {

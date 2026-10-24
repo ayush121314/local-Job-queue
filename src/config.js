@@ -17,6 +17,9 @@ const config = {
   retentionSeconds: seconds('JOBQ_RETENTION_SECONDS', 3 * 24 * 3600),
   retryDelaySeconds: seconds('JOBQ_RETRY_DELAY_SECONDS', 5 * 60),
   tickSeconds: 300,
+  heartbeatSeconds: seconds('JOBQ_HEARTBEAT_SECONDS', 3 * 60),
+  // No heartbeat for this long (counted from the later of the last beat and the last wake) = the job is dead.
+  heartbeatStaleSeconds: seconds('JOBQ_HEARTBEAT_STALE_SECONDS', 10 * 60),
   shell: process.env.JOBQ_SHELL || '/bin/zsh',
 }
 

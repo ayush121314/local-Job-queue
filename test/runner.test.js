@@ -9,9 +9,11 @@ const dir = mkdtempSync(join(tmpdir(), 'jobq-'))
 process.env.JOBQ_DB = join(dir, 'queue.db')
 process.env.JOBQ_LOGS = join(dir, 'logs')
 process.env.JOBQ_LOCK = join(dir, 'runner.lock')
+process.env.JOBQ_HEARTBEAT_SECONDS = '1'
+process.env.JOBQ_HEARTBEAT_STALE_SECONDS = '3'
 
 const { Queue } = await import('../src/queue.js')
-const { runTick, bootTime } = await import('../src/runner.js')
+const { runTick, bootTime, deadReason } = await import('../src/runner.js')
 const { withLock } = await import('../src/lock.js')
 
 const now = () => Math.floor(Date.now() / 1000)
@@ -105,9 +107,10 @@ test('a job started before the last boot (laptop restarted) is retried', () => {
   assert.equal(queue.list().waiting[0].id, id)
 })
 
-test('a job started after the last boot is left running, however long', () => {
+test('a job started hours ago that still beats is left running', () => {
   const id = queue.pushReady({ command: 'true', cwd: dir, now: now() })
   queue.markStarted(id, now() - 6 * 3600)
+  queue.beat(id, now())
   const result = runTick()
   assert.equal(result.retried, 0)
   assert.equal(result.running, 1)
@@ -201,4 +204,33 @@ test('a schedule that is not due yet is not touched', () => {
   queue.addSchedule({ command: 'true', cwd: dir, everySeconds: 600, firstAt: t + 600, catchUp: 'once', now: t })
   assert.equal(runTick().scheduled, 0)
   assert.equal(queue.schedules()[0].next_at, t + 600)
+})
+
+test('a running job keeps beating, and the beat only overwrites its own row', async () => {
+  const id = queue.pushReady({ command: `sleep 3 && ${ACK}`, cwd: dir, now: now() })
+  runTick()
+  const startedAt = queue.list().ready[0].started_at
+  assert.ok(await waitFor(() => (queue.list().ready[0]?.heartbeat_at ?? 0) > startedAt, 3000), 'heartbeat moved forward')
+  assert.equal(queue.db.prepare('SELECT COUNT(*) AS n FROM ready').get().n, 1)
+  assert.ok(await waitFor(() => !queue.isReady(id)))
+})
+
+test('wrapper and command force-killed: the beat stops and the next tick retries the job', async () => {
+  const id = queue.pushReady({ command: 'sleep 60 # jobq-kill-test', cwd: dir, now: now() })
+  runTick()
+  await sleep(500)
+  spawnSync('pkill', ['-9', '-f', 'jobq-kill-test'])
+  await sleep(4500)
+  assert.equal(runTick().retried, 1)
+  assert.equal(queue.list().waiting[0].id, id)
+})
+
+test('dead or alive: restart, stale beat, fresh beat, and the wake-from-sleep grace', () => {
+  const t = 10_000
+  const job = (started, beat) => ({ started_at: started, heartbeat_at: beat })
+  assert.equal(deadReason(job(t - 50, t - 50), { now: t, bootedAt: t - 10, wokeAt: 0 }), 'the laptop restarted')
+  assert.equal(deadReason(job(t - 50, t - 10), { now: t, bootedAt: 0, wokeAt: 0 }), 'no heartbeat')
+  assert.equal(deadReason(job(t - 50, t - 1), { now: t, bootedAt: 0, wokeAt: 0 }), null)
+  assert.equal(deadReason(job(t - 7200, t - 7200), { now: t, bootedAt: 0, wokeAt: t - 1 }), null, 'just woke up: wait')
+  assert.equal(deadReason(job(t - 7200, t - 7200), { now: t, bootedAt: 0, wokeAt: t - 10 }), 'no heartbeat', 'awake long enough')
 })
