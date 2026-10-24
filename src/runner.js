@@ -12,30 +12,21 @@ function runnerLog(line) {
   appendFileSync(join(config.logDir, 'runner.log'), `${stamp()} ${line}\n`)
 }
 
-// Start time of a live process in unix seconds, or null when no such process exists.
-function processStartedAt(pid) {
-  try {
-    const started = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).trim()
-    return started ? Math.floor(Date.parse(started) / 1000) : null
-  } catch {
-    return null
-  }
-}
-
-// Alive = a process with this pid exists AND started when we started it; after a reboot the
-// pid may belong to some other process, which the start time tells apart.
-function isRunning(job) {
-  const startedAt = processStartedAt(job.pid)
-  return startedAt !== null && Math.abs(startedAt - job.started_at) <= 5
+// Unix seconds of the last boot. Every job started before it died with the restart.
+function bootTime() {
+  const out = execFileSync('sysctl', ['-n', 'kern.boottime'], { encoding: 'utf8' })
+  return Number(/sec = (\d+)/.exec(out)[1])
 }
 
 // Fire and forget: the command runs on its own, with no time limit, and is deleted when it runs
-// `q ack` (as SQS DeleteMessage). Its output and exit code go to logs/<id>.log.
+// `q ack` (as SQS DeleteMessage). When it ends, however it ends, the wrapper's last line reports
+// `q finished <id>`, which retries the job if it was not acked. Output and exit code go to logs/<id>.log.
 function startJob(queue, job) {
   const logPath = join(config.logDir, `${job.id}.log`)
   appendFileSync(logPath, `--- ${stamp()} attempt ${job.attempts + 1} started\n$ ${job.command}\n`)
   const log = openSync(logPath, 'a')
-  const child = spawn(config.shell, ['-c', `${config.shell} -lc "$1"; echo "--- exit $?"`, 'jobq', job.command], {
+  const wrapper = `${config.shell} -lc "$1"; echo "--- exit $?"; q finished "$JOBQ_JOB_ID"`
+  const child = spawn(config.shell, ['-c', wrapper, 'jobq', job.command], {
     cwd: job.cwd,
     detached: true,
     stdio: ['ignore', log, log],
@@ -49,7 +40,7 @@ function startJob(queue, job) {
   })
   closeSync(log)
   child.unref()
-  queue.markStarted(job.id, child.pid, processStartedAt(child.pid) ?? nowSeconds())
+  queue.markStarted(job.id, nowSeconds())
 }
 
 function purgeLogs(cutoff) {
@@ -67,17 +58,18 @@ function tick(queue) {
   const scheduled = queue.fireDueSchedules(nowSeconds())
   const moved = queue.moveDue(nowSeconds())
 
+  // A restart kills every job without its wrapper reporting, so anything started before the boot is retried.
+  const bootedAt = bootTime()
   let retried = 0
   let running = 0
   for (const job of queue.startedJobs()) {
-    if (isRunning(job)) {
+    if (job.started_at >= bootedAt) {
       running += 1
       continue
     }
-    // Ended (or the laptop restarted) without `q ack`: acked jobs are no longer in READY.
     queue.retryLater(job, nowSeconds() + config.retryDelaySeconds)
     retried += 1
-    runnerLog(`job ${job.id} ended without q ack, retry in ${config.retryDelaySeconds}s`)
+    runnerLog(`job ${job.id} was running when the laptop restarted, retry in ${config.retryDelaySeconds}s`)
   }
 
   const toStart = queue.notStartedJobs()
@@ -102,7 +94,7 @@ function runTick() {
   })
 }
 
-export { tick, runTick, isRunning }
+export { tick, runTick, bootTime }
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   try {

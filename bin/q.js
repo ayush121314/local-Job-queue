@@ -81,7 +81,7 @@ function list(queue) {
   const tries = (job) => (job.attempts ? `  (tries ${job.attempts})` : '')
   for (const s of schedules) console.log(`S${s.id}  EVERY ${span(s.every_seconds)}  catch-up ${s.catch_up}  next ${describe(s.next_at, now)}  ${s.command}  [${s.cwd}]`)
   for (const job of ready) {
-    const state = job.pid ? `RUNNING  since ${describe(job.started_at, now)}` : 'READY    next tick'
+    const state = job.started_at ? `RUNNING  since ${describe(job.started_at, now).replace('late by', 'for')}` : 'READY    next tick'
     console.log(`#${job.id}  ${state}${tries(job)}  ${job.command}  [${job.cwd}]`)
   }
   for (const job of waiting) console.log(`#${job.id}  WAITING  ${describe(job.run_at, now)}${tries(job)}  ${job.command}  [${job.cwd}]`)
@@ -103,6 +103,14 @@ function main() {
     if (action === 'add') return add(args, queue)
     if (action === 'every') return every(args, queue)
     if (action === 'list') return list(queue)
+    if (action === 'finished') {
+      const id = Number(args[0] || process.env.JOBQ_JOB_ID)
+      if (!id) throw new WhenError('q finished needs a job id')
+      if (queue.finish(id, Math.floor(Date.now() / 1000) + config.retryDelaySeconds)) {
+        console.log(`#${id} ended without q ack: retry in ${config.retryDelaySeconds / 60} min`)
+      }
+      return
+    }
     if (action === 'ack') {
       const id = Number(args[0] || process.env.JOBQ_JOB_ID)
       if (!id) throw new WhenError('q ack needs a job id, or run it inside a queued command ($JOBQ_JOB_ID)')

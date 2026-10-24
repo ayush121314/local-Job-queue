@@ -12,7 +12,8 @@ q add 18:00 "cmd"    ──push──▶  WAITING (sorted by time)
 - **Runner:** a launchd agent. It runs at login/boot and every 5 minutes, so jobs missed while the laptop was off run as soon as it is on.
 - **Only due work is read:** WAITING is indexed on `run_at`; each tick reads `run_at <= now` and stops at the first future job.
 - **Ack (like SQS DeleteMessage):** every job's command must run `q ack` when its work is done. The runner gives it `$JOBQ_JOB_ID` and `$JOBQ_ATTEMPT` (1 on the first try), and `q` is always on its PATH. Acked → deleted. Not acked when its process has ended (whatever the exit code) → back to WAITING for 5 minutes later (`attempts + 1`).
-- **Fire and forget, no time limit:** the runner starts each command in the background and moves on, so jobs run in parallel and may take as long as they need. It saves each process id; on later ticks a process still alive is left alone, and one that has ended (or died with the laptop) without `q ack` is retried.
+- **Fire and forget, no time limit:** the runner starts each command in the background and moves on, so jobs run in parallel and may take as long as they need.
+- **Failure is reported by the job itself:** each command runs inside a wrapper whose last line is `q finished $JOBQ_JOB_ID`. When the command ends, however it ends, a job that never acked goes straight back to WAITING. A laptop restart kills jobs before they can report, so any job started before the last boot (`sysctl kern.boottime`) is retried on the next tick.
 - **Schedules:** `q every` pushes its command into READY every interval. Slots missed while the laptop was off: `--catchup once` (default) pushes once, `--catchup all` pushes once per missed slot; the next push stays on its slot.
 - **Purge:** anything older than 3 days is deleted from both queues, with its log.
 - **Storage:** one SQLite file, `data/queue.db`.

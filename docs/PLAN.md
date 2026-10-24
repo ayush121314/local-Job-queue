@@ -64,3 +64,9 @@ READY gains `pid`, `started_at`. Each tick: started jobs whose process is gone (
 so a reused pid after a reboot is not mistaken for ours) and still in READY (not acked) → WAITING in 5 min.
 New READY jobs are spawned detached (`zsh -c 'zsh -lc "$1"; echo "--- exit $?"'`) with output to logs/<id>.log; the runner does not wait.
 Jobs run in parallel. No timeout anywhere.
+
+## Failure detection by job id (changed 25 Oct 2026, owner: "give id at start and use that always")
+No pids. READY keeps only `started_at`. The wrapper is `zsh -lc "<cmd>"; echo "--- exit $?"; q finished "$JOBQ_JOB_ID"`:
+`q finished <id>` retries the job at once if it is still in READY (not acked). A restart kills jobs before they report,
+so each tick retries READY jobs with `started_at` < boot time (`sysctl -n kern.boottime`). Gap: `kill -9` of the wrapper
+alone leaves the job RUNNING until the 3-day purge (`q remove`).

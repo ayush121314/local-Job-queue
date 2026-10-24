@@ -11,7 +11,7 @@ process.env.JOBQ_LOGS = join(dir, 'logs')
 process.env.JOBQ_LOCK = join(dir, 'runner.lock')
 
 const { Queue } = await import('../src/queue.js')
-const { runTick } = await import('../src/runner.js')
+const { runTick, bootTime } = await import('../src/runner.js')
 const { withLock } = await import('../src/lock.js')
 
 const now = () => Math.floor(Date.now() / 1000)
@@ -73,37 +73,45 @@ test('jobs run in parallel', async () => {
   assert.ok(Date.now() - begin < 3800, 'both finished in about 2s, not 4s')
 })
 
-test('a process that ended without q ack is retried on the next tick', async () => {
+test('a command that ends without q ack is retried at once by its wrapper (q finished)', async () => {
   const id = queue.pushReady({ command: 'echo no-ack; exit 0', cwd: dir, now: now() })
   runTick()
-  assert.ok(await waitFor(() => /--- exit 0/.test(logOf(id))))
-  await sleep(200)
-  assert.equal(runTick().retried, 1)
+  assert.ok(await waitFor(() => queue.list().waiting.some((job) => job.id === id)), 'back in waiting without another tick')
   const [job] = queue.list().waiting
-  assert.equal(job.id, id)
   assert.equal(job.attempts, 1)
   assert.ok(job.run_at >= now() + 290)
+  assert.match(logOf(id), /--- exit 0/)
+})
+
+test('a command that crashes without q ack is retried the same way', async () => {
+  const id = queue.pushReady({ command: 'kill -9 $$', cwd: dir, now: now() })
+  runTick()
+  assert.ok(await waitFor(() => queue.list().waiting.some((job) => job.id === id)))
 })
 
 test('a job that acks and then exits non-zero is done', async () => {
   const id = queue.pushReady({ command: `${ACK} && exit 4`, cwd: dir, now: now() })
   runTick()
   assert.ok(await waitFor(() => /--- exit 4/.test(logOf(id))))
-  assert.equal(runTick().retried, 0)
+  await sleep(500)
   assert.deepEqual(queue.list().waiting, [])
+  assert.equal(queue.isReady(id), false)
 })
 
-test('a started job whose process is gone (laptop restarted) is retried', () => {
+test('a job started before the last boot (laptop restarted) is retried', () => {
   const id = queue.pushReady({ command: 'true', cwd: dir, now: now() })
-  queue.markStarted(id, 999999, now() - 600)
+  queue.markStarted(id, bootTime() - 10)
   assert.equal(runTick().retried, 1)
   assert.equal(queue.list().waiting[0].id, id)
 })
 
-test('a reused pid (alive, but started at another time) does not count as our job', () => {
+test('a job started after the last boot is left running, however long', () => {
   const id = queue.pushReady({ command: 'true', cwd: dir, now: now() })
-  queue.markStarted(id, process.pid, now() - 86400)
-  assert.equal(runTick().retried, 1)
+  queue.markStarted(id, now() - 6 * 3600)
+  const result = runTick()
+  assert.equal(result.retried, 0)
+  assert.equal(result.running, 1)
+  assert.ok(queue.isReady(id))
 })
 
 test('JOBQ_JOB_ID and JOBQ_ATTEMPT are passed to the command', async () => {

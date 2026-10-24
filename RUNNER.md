@@ -16,7 +16,7 @@ q add 18:00 "cmd"  ──push──▶ WAITING ──(when due)──▶ READY  
   1. purges anything older than 3 days;
   2. fires due schedules;
   3. moves due WAITING jobs to READY;
-  4. checks jobs it started earlier: still running → left alone; ended without `q ack` → retried in 5 min;
+  4. retries jobs that were running when the laptop restarted (started before the last boot);
   5. starts every new READY job **in the background and moves on** (fire and forget).
 - Work missed while the laptop was off runs on the first tick after it is back on.
 
@@ -42,7 +42,8 @@ npm install && ./scripts/install.sh
 | **`$JOBQ_JOB_ID`** | Set for every run; `q ack` reads it. Use it in your logs too. |
 | **No time limit** | A job may run for an hour or a day. As long as its process is alive, the queue leaves it alone. |
 | **Parallel** | Every ready job is started at once, in the background. Ten due jobs = ten processes at the same time; if your jobs must not overlap, make the command itself wait (e.g. a lock file). |
-| **Failure = process ended without ack** | When the process has exited (any exit code) or died with the laptop and never ran `q ack`, the job is retried 5 minutes later. |
+| **Failure = ended without ack** | Your command runs inside a wrapper that calls `q finished` when it ends. Ended (any exit code, even a crash) without `q ack` → retried 5 minutes later. Laptop restarted mid-job → retried on the first tick after boot. |
+| **Don't kill the wrapper** | `kill -9` on the wrapper itself (not your command) leaves the job RUNNING until the 3-day purge; clear it with `q remove <id>`. |
 | **At least once** | If the laptop dies after your work but before `q ack`, the job runs again. Make commands safe to repeat: check "already done?" first. |
 | **3-day purge** | A job that never acks is retried every 5 minutes until it is 3 days old, then deleted. |
 
