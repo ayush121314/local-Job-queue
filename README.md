@@ -49,3 +49,5 @@ Settings (env overrides) are in `src/config.js`. Plan: `docs/PLAN.md`. Tests: `n
 ```bash
 ./scripts/uninstall.sh    # queue data in data/ is kept
 ```
+
+Using it from another repo, end to end: [RUNNER.md](RUNNER.md).
