@@ -15,7 +15,24 @@ const { runTick } = await import('../src/runner.js')
 const { withLock } = await import('../src/lock.js')
 
 const now = () => Math.floor(Date.now() / 1000)
-const ACK = `${process.execPath} ${join(import.meta.dirname, '..', 'bin', 'q.js')} ack`
+const Q = join(import.meta.dirname, '..', 'bin', 'q.js')
+const ACK = `${process.execPath} ${Q} ack`
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+async function waitFor(check, ms = 8000) {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    if (check()) return true
+    await sleep(100)
+  }
+  return false
+}
+
+const logOf = (id) => {
+  const path = join(dir, 'logs', `${id}.log`)
+  return existsSync(path) ? readFileSync(path, 'utf8') : ''
+}
+
 let queue
 
 beforeEach(() => {
@@ -24,63 +41,87 @@ beforeEach(() => {
   queue.db.exec('DELETE FROM waiting; DELETE FROM ready; DELETE FROM schedules;')
 })
 
-test('a ready job runs once and is removed on success', () => {
+test('a job is started in the background and deleted when its command acks', async () => {
   const marker = join(dir, 'ran.txt')
   const id = queue.pushReady({ command: `echo hi >> ${marker} && ${ACK}`, cwd: dir, now: now() })
-  assert.deepEqual(runTick(), { purged: 0, scheduled: 0, moved: 0, done: 1, failed: 0 })
+  assert.equal(runTick().started, 1)
+  assert.ok(await waitFor(() => !queue.isReady(id)), 'job acked')
   assert.equal(readFileSync(marker, 'utf8'), 'hi\n')
-  assert.deepEqual(queue.list(), { ready: [], waiting: [], schedules: [] })
-  assert.match(readFileSync(join(dir, 'logs', `${id}.log`), 'utf8'), /exit 0/)
+  assert.ok(await waitFor(() => /--- exit 0/.test(logOf(id))))
+  assert.equal(runTick().started, 0)
+  assert.equal(readFileSync(marker, 'utf8'), 'hi\n')
+})
+
+test('the runner does not wait: a long job keeps running across ticks with no time limit', async () => {
+  const id = queue.pushReady({ command: `sleep 3 && ${ACK}`, cwd: dir, now: now() })
+  const begin = Date.now()
   runTick()
-  assert.equal(readFileSync(marker, 'utf8'), 'hi\n')
+  assert.ok(Date.now() - begin < 2000, 'tick returned without waiting')
+  const second = runTick()
+  assert.equal(second.running, 1)
+  assert.equal(second.retried, 0)
+  assert.equal(second.started, 0)
+  assert.ok(await waitFor(() => !queue.isReady(id)), 'acked after it finished')
 })
 
-test('only due waiting jobs move; future ones stay untouched', () => {
-  queue.pushWaiting({ command: ACK, cwd: dir, runAt: now() - 60, now: now() })
-  const later = queue.pushWaiting({ command: 'true', cwd: dir, runAt: now() + 3600, now: now() })
-  const result = runTick()
-  assert.equal(result.moved, 1)
-  assert.equal(result.done, 1)
-  assert.deepEqual(queue.list().waiting.map((job) => job.id), [later])
+test('jobs run in parallel', async () => {
+  const a = queue.pushReady({ command: `sleep 2 && ${ACK}`, cwd: dir, now: now() })
+  const b = queue.pushReady({ command: `sleep 2 && ${ACK}`, cwd: dir, now: now() })
+  const begin = Date.now()
+  assert.equal(runTick().started, 2)
+  assert.ok(await waitFor(() => !queue.isReady(a) && !queue.isReady(b)))
+  assert.ok(Date.now() - begin < 3800, 'both finished in about 2s, not 4s')
 })
 
-test('a command that exits 0 without q ack is retried', () => {
-  const id = queue.pushReady({ command: 'true', cwd: dir, now: now() })
-  assert.equal(runTick().failed, 1)
-  assert.equal(queue.list().waiting[0].id, id)
-  assert.match(readFileSync(join(dir, 'logs', `${id}.log`), 'utf8'), /exit 0 · not acked/)
-})
-
-test('a command that acks and then exits non-zero is done', () => {
-  const id = queue.pushReady({ command: `${ACK} && exit 4`, cwd: dir, now: now() })
-  assert.equal(runTick().done, 1)
-  assert.deepEqual(queue.list().waiting, [])
-  assert.match(readFileSync(join(dir, 'logs', `${id}.log`), 'utf8'), /exit 4 · acked/)
-})
-
-test('q ack outside a job fails', () => {
-  const env = { ...process.env }
-  delete env.JOBQ_JOB_ID
-  const run = spawnSync(process.execPath, [join(import.meta.dirname, '..', 'bin', 'q.js'), 'ack'], { env, encoding: 'utf8' })
-  assert.equal(run.status, 1)
-  assert.match(run.stderr, /needs a job id/)
-})
-
-test('a failed job goes back to waiting with a retry time and attempts + 1', () => {
-  const id = queue.pushReady({ command: 'exit 3', cwd: dir, now: now() })
-  assert.equal(runTick().failed, 1)
+test('a process that ended without q ack is retried on the next tick', async () => {
+  const id = queue.pushReady({ command: 'echo no-ack; exit 0', cwd: dir, now: now() })
+  runTick()
+  assert.ok(await waitFor(() => /--- exit 0/.test(logOf(id))))
+  await sleep(200)
+  assert.equal(runTick().retried, 1)
   const [job] = queue.list().waiting
   assert.equal(job.id, id)
   assert.equal(job.attempts, 1)
   assert.ok(job.run_at >= now() + 290)
-  assert.match(readFileSync(join(dir, 'logs', `${id}.log`), 'utf8'), /exit 3/)
 })
 
-test('a job left in ready (runner killed mid-run) runs again on the next tick', () => {
-  queue.pushWaiting({ command: ACK, cwd: dir, runAt: now() - 1, now: now() })
-  queue.moveDue(now())
-  assert.equal(queue.list().ready.length, 1)
-  assert.equal(runTick().done, 1)
+test('a job that acks and then exits non-zero is done', async () => {
+  const id = queue.pushReady({ command: `${ACK} && exit 4`, cwd: dir, now: now() })
+  runTick()
+  assert.ok(await waitFor(() => /--- exit 4/.test(logOf(id))))
+  assert.equal(runTick().retried, 0)
+  assert.deepEqual(queue.list().waiting, [])
+})
+
+test('a started job whose process is gone (laptop restarted) is retried', () => {
+  const id = queue.pushReady({ command: 'true', cwd: dir, now: now() })
+  queue.markStarted(id, 999999, now() - 600)
+  assert.equal(runTick().retried, 1)
+  assert.equal(queue.list().waiting[0].id, id)
+})
+
+test('a reused pid (alive, but started at another time) does not count as our job', () => {
+  const id = queue.pushReady({ command: 'true', cwd: dir, now: now() })
+  queue.markStarted(id, process.pid, now() - 86400)
+  assert.equal(runTick().retried, 1)
+})
+
+test('JOBQ_JOB_ID and JOBQ_ATTEMPT are passed to the command', async () => {
+  const marker = join(dir, 'env.txt')
+  const id = queue.pushReady({ command: `echo "$JOBQ_JOB_ID $JOBQ_ATTEMPT" > ${marker} && ${ACK}`, cwd: dir, now: now() })
+  runTick()
+  assert.ok(await waitFor(() => !queue.isReady(id)))
+  assert.equal(readFileSync(marker, 'utf8'), `${id} 1\n`)
+})
+
+test('only due waiting jobs move; future ones stay untouched', async () => {
+  const due = queue.pushWaiting({ command: ACK, cwd: dir, runAt: now() - 60, now: now() })
+  const later = queue.pushWaiting({ command: ACK, cwd: dir, runAt: now() + 3600, now: now() })
+  const result = runTick()
+  assert.equal(result.moved, 1)
+  assert.equal(result.started, 1)
+  assert.ok(await waitFor(() => !queue.isReady(due)))
+  assert.deepEqual(queue.list().waiting.map((job) => job.id), [later])
 })
 
 test('jobs and logs older than 3 days are purged', () => {
@@ -97,8 +138,7 @@ test('jobs and logs older than 3 days are purged', () => {
 })
 
 test('a second tick while one holds the lock is skipped', () => {
-  const inner = withLock(process.env.JOBQ_LOCK, () => runTick())
-  assert.equal(inner, null)
+  assert.equal(withLock(process.env.JOBQ_LOCK, () => runTick()), null)
 })
 
 test('ids stay unique across both queues', () => {
@@ -107,18 +147,25 @@ test('ids stay unique across both queues', () => {
   assert.notEqual(a, b)
 })
 
-test('a schedule pushes its command when due and moves next_at forward one slot', () => {
+test('q ack outside a job fails', () => {
+  const env = { ...process.env }
+  delete env.JOBQ_JOB_ID
+  const run = spawnSync(process.execPath, [Q, 'ack'], { env, encoding: 'utf8' })
+  assert.equal(run.status, 1)
+  assert.match(run.stderr, /needs a job id/)
+})
+
+test('a schedule pushes its command when due and moves next_at forward one slot', async () => {
   const marker = join(dir, 'every.txt')
   const t = now()
   const id = queue.addSchedule({ command: `echo tick >> ${marker} && ${ACK}`, cwd: dir, everySeconds: 600, firstAt: t - 5, catchUp: 'once', now: t })
   const result = runTick()
   assert.equal(result.scheduled, 1)
-  assert.equal(result.done, 1)
-  assert.equal(readFileSync(marker, 'utf8'), 'tick\n')
+  assert.equal(result.started, 1)
+  assert.ok(await waitFor(() => existsSync(marker) && readFileSync(marker, 'utf8') === 'tick\n'))
   assert.equal(queue.schedules()[0].next_at, t - 5 + 600)
   assert.equal(runTick().scheduled, 0)
   assert.ok(queue.stopSchedule(id))
-  assert.deepEqual(queue.schedules(), [])
 })
 
 test('laptop off 6h, hourly schedule, catch-up once: one push, next slot kept', () => {
@@ -129,15 +176,15 @@ test('laptop off 6h, hourly schedule, catch-up once: one push, next slot kept', 
   assert.equal(queue.schedules()[0].next_at, first + 6 * 3600)
 })
 
-test('laptop off 6h, hourly schedule, catch-up all: one push per missed slot', () => {
+test('laptop off 6h, hourly schedule, catch-up all: one push per missed slot', async () => {
   const marker = join(dir, 'all.txt')
   const t = now()
   const first = t - 6 * 3600 + 10
   queue.addSchedule({ command: `echo x >> ${marker} && ${ACK}`, cwd: dir, everySeconds: 3600, firstAt: first, catchUp: 'all', now: t })
   const result = runTick()
   assert.equal(result.scheduled, 6)
-  assert.equal(result.done, 6)
-  assert.equal(readFileSync(marker, 'utf8'), 'x\n'.repeat(6))
+  assert.equal(result.started, 6)
+  assert.ok(await waitFor(() => existsSync(marker) && readFileSync(marker, 'utf8') === 'x\n'.repeat(6)))
   assert.equal(queue.schedules()[0].next_at, first + 6 * 3600)
 })
 

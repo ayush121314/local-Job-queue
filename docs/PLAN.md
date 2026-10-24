@@ -40,7 +40,7 @@ ready  (id PK, command, cwd, attempts, created_at)           INDEX(created_at)
 | `q run` | Run one tick now |
 
 ## Settings (`src/config.js`, env overrides)
-Tick 5 min (launchd), retention 3 days, retry delay 5 min, command timeout 30 min.
+Tick 5 min (launchd), retention 3 days, retry delay 5 min. No command time limit.
 
 ## Files
 - `src/config.js` paths and numbers · `src/queue.js` the only file that touches SQLite · `src/when.js` time parsing · `src/runner.js` one tick · `bin/q.js` CLI
@@ -58,3 +58,9 @@ Tick 5 min (launchd), retention 3 days, retry delay 5 min, command timeout 30 mi
 `schedules(id, command, cwd, every_seconds, next_at, catch_up once|all, created_at)`, `INDEX(next_at)`.
 Each tick, before the move: `SELECT … WHERE next_at <= now` (only due schedules). Slots due = `floor((now − next_at) / every) + 1`.
 `catch_up = once` pushes 1 job, `all` pushes one per slot; `next_at += slots × every` (stays on its slot). Schedules are never purged; `q stop`.
+
+## Fire and forget (changed 25 Oct 2026, owner: "1 hr ka bhi kaam ho skta hai", no time limits)
+READY gains `pid`, `started_at`. Each tick: started jobs whose process is gone (pid + `ps lstart` start time,
+so a reused pid after a reboot is not mistaken for ours) and still in READY (not acked) → WAITING in 5 min.
+New READY jobs are spawned detached (`zsh -c 'zsh -lc "$1"; echo "--- exit $?"'`) with output to logs/<id>.log; the runner does not wait.
+Jobs run in parallel. No timeout anywhere.

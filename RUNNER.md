@@ -16,7 +16,8 @@ q add 18:00 "cmd"  ──push──▶ WAITING ──(when due)──▶ READY  
   1. purges anything older than 3 days;
   2. fires due schedules;
   3. moves due WAITING jobs to READY;
-  4. runs READY jobs **one at a time**.
+  4. checks jobs it started earlier: still running → left alone; ended without `q ack` → retried in 5 min;
+  5. starts every new READY job **in the background and moves on** (fire and forget).
 - Work missed while the laptop was off runs on the first tick after it is back on.
 
 ## 2. Check it is installed
@@ -39,8 +40,9 @@ npm install && ./scripts/install.sh
 | **Runs in a login shell** | `zsh -lc "<command>"`, so Homebrew, nvm, `node`, `npm`, `aws` and `claude` work as in your terminal. `q` and the runner's `node` are always on PATH. |
 | **Folder** | The command runs in `--cwd` (default: the folder you ran `q add` / `q every` from). Pass `--cwd` explicitly from scripts. |
 | **`$JOBQ_JOB_ID`** | Set for every run; `q ack` reads it. Use it in your logs too. |
-| **30-minute limit** | Longer runs are killed and retried. Change `commandTimeoutSeconds` in `src/config.js` if needed. |
-| **One at a time** | Jobs run in order, so a 20-minute job delays the ones behind it. |
+| **No time limit** | A job may run for an hour or a day. As long as its process is alive, the queue leaves it alone. |
+| **Parallel** | Every ready job is started at once, in the background. Ten due jobs = ten processes at the same time; if your jobs must not overlap, make the command itself wait (e.g. a lock file). |
+| **Failure = process ended without ack** | When the process has exited (any exit code) or died with the laptop and never ran `q ack`, the job is retried 5 minutes later. |
 | **At least once** | If the laptop dies after your work but before `q ack`, the job runs again. Make commands safe to repeat: check "already done?" first. |
 | **3-day purge** | A job that never acks is retried every 5 minutes until it is 3 days old, then deleted. |
 
@@ -133,8 +135,8 @@ The `&& q ack` in the queued command acks only when `process-one.js` exits 0.
 ## 7. Watch and debug
 
 ```bash
-q list                 # schedules (S…), READY and WAITING jobs, with "late by" / tries
-q logs <id>            # every attempt: time, exit code, acked / not acked, stdout + stderr
+q list                 # schedules (S…), RUNNING / READY / WAITING jobs, with "late by" / tries
+q logs <id>            # every attempt: start time, stdout + stderr, exit code
 q run                  # run one tick now instead of waiting for the next 5 minutes
 q remove <id>          # delete a job
 q stop S<id>           # stop a schedule
@@ -144,9 +146,9 @@ cat ~/Downloads/WORK/job-queue/logs/launchd.err.log          # the runner itself
 
 | You see | Cause | Fix |
 |---|---|---|
-| `exit 0 · not acked`, job keeps retrying | Command never ran `q ack` | Add `&& q ack` or ack in code |
+| `--- exit 0` in the log, job keeps retrying | Command never ran `q ack` | Add `&& q ack` or ack in code |
 | `exit 127` / `command not found` | Tool not on the login-shell PATH | Use the full path, or add it in `~/.zprofile` |
-| Job killed after 30 min | Timeout | Make the job smaller, or raise `commandTimeoutSeconds` |
+| `q list` shows RUNNING for hours | The command is still running (or stuck) | `q logs <id>`; kill the process if stuck, it is retried |
 | Job ran twice | Laptop died after the work, before the ack | Make it safe to repeat (check "already done?") |
 | Nothing runs | Runner not loaded | `./scripts/install.sh`, then `launchctl print …` |
 
@@ -155,7 +157,7 @@ cat ~/Downloads/WORK/job-queue/logs/launchd.err.log          # the runner itself
 - [ ] The command works when you run it by hand in that folder.
 - [ ] It runs `q ack` only after the work succeeded.
 - [ ] Running it twice does no harm.
-- [ ] It finishes within 30 minutes.
+- [ ] It is fine running at the same time as other jobs.
 - [ ] `--cwd` points at the repo.
 - [ ] `q add` / `q every` printed the time you expected.
-- [ ] After the first run, `q logs <id>` shows `acked`.
+- [ ] After the first run, the job is gone from `q list` (it acked).

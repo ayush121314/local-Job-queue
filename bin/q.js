@@ -80,7 +80,10 @@ function list(queue) {
   const now = new Date()
   const tries = (job) => (job.attempts ? `  (tries ${job.attempts})` : '')
   for (const s of schedules) console.log(`S${s.id}  EVERY ${span(s.every_seconds)}  catch-up ${s.catch_up}  next ${describe(s.next_at, now)}  ${s.command}  [${s.cwd}]`)
-  for (const job of ready) console.log(`#${job.id}  READY    next tick${tries(job)}  ${job.command}  [${job.cwd}]`)
+  for (const job of ready) {
+    const state = job.pid ? `RUNNING  since ${describe(job.started_at, now)}` : 'READY    next tick'
+    console.log(`#${job.id}  ${state}${tries(job)}  ${job.command}  [${job.cwd}]`)
+  }
   for (const job of waiting) console.log(`#${job.id}  WAITING  ${describe(job.run_at, now)}${tries(job)}  ${job.command}  [${job.cwd}]`)
 }
 
@@ -93,7 +96,7 @@ function main() {
   }
   if (action === 'run') {
     const r = runTick()
-    return console.log(r === null ? 'another tick is running' : `purged ${r.purged}, scheduled ${r.scheduled}, moved ${r.moved}, done ${r.done}, failed ${r.failed}`)
+    return console.log(r === null ? 'another tick is running' : `purged ${r.purged}, scheduled ${r.scheduled}, moved ${r.moved}, started ${r.started}, retried ${r.retried}, still running ${r.running}`)
   }
   const queue = new Queue(config.dbPath)
   try {

@@ -1,5 +1,5 @@
-import { spawnSync } from 'node:child_process'
-import { appendFileSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { appendFileSync, closeSync, mkdirSync, openSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { config } from './config.js'
 import { Queue } from './queue.js'
@@ -12,24 +12,44 @@ function runnerLog(line) {
   appendFileSync(join(config.logDir, 'runner.log'), `${stamp()} ${line}\n`)
 }
 
-// A job succeeds only if its command ran `q ack` (which deletes it from READY), as SQS DeleteMessage.
-// The exit code is logged but does not decide anything.
-function runJob(queue, job) {
-  const result = spawnSync(config.shell, ['-lc', job.command], {
+// Start time of a live process in unix seconds, or null when no such process exists.
+function processStartedAt(pid) {
+  try {
+    const started = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).trim()
+    return started ? Math.floor(Date.parse(started) / 1000) : null
+  } catch {
+    return null
+  }
+}
+
+// Alive = a process with this pid exists AND started when we started it; after a reboot the
+// pid may belong to some other process, which the start time tells apart.
+function isRunning(job) {
+  const startedAt = processStartedAt(job.pid)
+  return startedAt !== null && Math.abs(startedAt - job.started_at) <= 5
+}
+
+// Fire and forget: the command runs on its own, with no time limit, and is deleted when it runs
+// `q ack` (as SQS DeleteMessage). Its output and exit code go to logs/<id>.log.
+function startJob(queue, job) {
+  const logPath = join(config.logDir, `${job.id}.log`)
+  appendFileSync(logPath, `--- ${stamp()} attempt ${job.attempts + 1} started\n$ ${job.command}\n`)
+  const log = openSync(logPath, 'a')
+  const child = spawn(config.shell, ['-c', `${config.shell} -lc "$1"; echo "--- exit $?"`, 'jobq', job.command], {
     cwd: job.cwd,
-    encoding: 'utf8',
-    timeout: config.commandTimeoutSeconds * 1000,
-    maxBuffer: 50 * 1024 * 1024,
+    detached: true,
+    stdio: ['ignore', log, log],
     // launchd starts us with a bare PATH: put `q` and this node first so `q ack` always works.
-    env: { ...process.env, JOBQ_JOB_ID: String(job.id), PATH: `${config.binDir}:${dirname(process.execPath)}:${process.env.PATH || ''}` },
+    env: {
+      ...process.env,
+      JOBQ_JOB_ID: String(job.id),
+      JOBQ_ATTEMPT: String(job.attempts + 1),
+      PATH: `${config.binDir}:${dirname(process.execPath)}:${process.env.PATH || ''}`,
+    },
   })
-  const exit = result.error ? result.error.message : `exit ${result.status ?? result.signal}`
-  const acked = !queue.isReady(job.id)
-  appendFileSync(
-    join(config.logDir, `${job.id}.log`),
-    `--- ${stamp()} attempt ${job.attempts + 1} · ${exit} · ${acked ? 'acked' : 'not acked'}\n$ ${job.command}\n${result.stdout || ''}${result.stderr || ''}\n`,
-  )
-  return { acked, exit }
+  closeSync(log)
+  child.unref()
+  queue.markStarted(job.id, child.pid, processStartedAt(child.pid) ?? nowSeconds())
 }
 
 function purgeLogs(cutoff) {
@@ -46,22 +66,28 @@ function tick(queue) {
   purgeLogs(cutoff)
   const scheduled = queue.fireDueSchedules(nowSeconds())
   const moved = queue.moveDue(nowSeconds())
-  let done = 0
-  let failed = 0
-  for (const job of queue.readyJobs()) {
-    const { acked, exit } = runJob(queue, job)
-    if (acked) {
-      done += 1
-    } else {
-      queue.retryLater(job, nowSeconds() + config.retryDelaySeconds)
-      failed += 1
-      runnerLog(`job ${job.id} not acked (${exit}), retry in ${config.retryDelaySeconds}s`)
+
+  let retried = 0
+  let running = 0
+  for (const job of queue.startedJobs()) {
+    if (isRunning(job)) {
+      running += 1
+      continue
     }
+    // Ended (or the laptop restarted) without `q ack`: acked jobs are no longer in READY.
+    queue.retryLater(job, nowSeconds() + config.retryDelaySeconds)
+    retried += 1
+    runnerLog(`job ${job.id} ended without q ack, retry in ${config.retryDelaySeconds}s`)
   }
-  if (purged.length || scheduled || moved || done || failed) {
-    runnerLog(`tick: purged ${purged.length}, scheduled ${scheduled}, moved ${moved}, done ${done}, failed ${failed}`)
+
+  const toStart = queue.notStartedJobs()
+  for (const job of toStart) startJob(queue, job)
+
+  const started = toStart.length
+  if (purged.length || scheduled || moved || started || retried) {
+    runnerLog(`tick: purged ${purged.length}, scheduled ${scheduled}, moved ${moved}, started ${started}, retried ${retried}, still running ${running}`)
   }
-  return { purged: purged.length, scheduled, moved, done, failed }
+  return { purged: purged.length, scheduled, moved, started, retried, running }
 }
 
 function runTick() {
@@ -76,7 +102,7 @@ function runTick() {
   })
 }
 
-export { tick, runTick }
+export { tick, runTick, isRunning }
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
   try {
